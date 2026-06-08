@@ -17,6 +17,21 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 1.23 — WHOOP 5.0/MG historical decode parity (Android)
+
+- **Added (Android): WHOOP 5.0/MG type-47 v18 historical records now decode on Android** — bringing it to
+  parity with the macOS decode shipped in 1.21. New `decodeWhoop5Historical` in `HistoricalStreams.kt`
+  reads the WHOOP5-absolute layout (record @8, so `unix@15`/`hr@22`/`rr@24+`/`gravity@45/49/53` — NOT the
+  WHOOP4 V24 offsets) plus the per-second fields each gated to a physical range: `skin_temp_raw@73`
+  (kept only when /100 ∈ 20–45 °C), `dynamic_acceleration@41` (f32, 0–8 g), `step_motion_counter@57`,
+  `motion_wear_quality@63` (0/1/2). `decodeHistorical` routes the WHOOP5 family to it; the offload
+  `extractHistoricalStreams` type-dispatch is now family-aware (`frame[8]` for WHOOP5 vs `frame[4]` for
+  WHOOP4). Verified by a new `Whoop5HistoricalDecodeTest` against the **same real worn/off-wrist frames**
+  the macOS tests use (so both platforms decode identical bytes); full Android unit suite green, macOS
+  unaffected (117 tests). Decode layer only — it activates when the 5/MG history offload runs. Fields the
+  source report listed but that didn't decode consistently on this firmware (cardiac/sleep-state/perfusion)
+  are deliberately omitted; SpO₂ remains impossible offline.
+
 ## 1.22 — Battery refresh on WHOOP 5.0/MG (Mac + Android)
 
 - **Fixed (macOS + Android): "Refresh battery" was a no-op on WHOOP 5.0/MG.** `getBattery()` sent the

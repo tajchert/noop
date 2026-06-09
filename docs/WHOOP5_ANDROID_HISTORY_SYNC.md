@@ -183,6 +183,38 @@ The first direct connect attempt can still time out with `Confirmed write failed
 The automatic reconnect now reuses the bonded device and the second attempt reached the working
 Puffin session. This is still a hardware-tested workaround, not a final root-cause fix.
 
+## 2026-06-10 Follow-up: Range-Gated Transfer and No-Trim Trial
+
+Implemented and hardware-tested two safer history-sync behaviors:
+
+```text
+GET_DATA_RANGE is sent first.
+SEND_HISTORICAL_DATA is sent only after GET_DATA_RANGE SUCCESS.
+WHOOP 5 HISTORY_END trim ACK is skipped while bodyPackets=0.
+```
+
+Two-minute hardware result:
+
+```text
+GET_DATA_RANGE attempt 1: no response before idle retry.
+GET_DATA_RANGE attempt 2: PENDING, then SUCCESS.
+SEND_HISTORICAL_DATA: SUCCESS.
+HISTORY_END trim=4512 repeated.
+Trim ACK skipped each time because bodyPackets=0.
+Final summary: timeout, bodyPackets=0, counts=COMMAND_RESPONSE=5, CONSOLE_LOGS=9, EVENT=1, METADATA=6, REALTIME_DATA=16.
+unknown samples=none.
+```
+
+Goose comparison:
+
+- Goose also gates `SEND_HISTORICAL_DATA` on a valid `GET_DATA_RANGE SUCCESS`.
+- Goose treats `GET_DATA_RANGE PENDING` as pending and waits for a final response.
+- Goose has an `acknowledgeHistoricalDataResult` switch.
+- When that switch is disabled, Goose suppresses ACKs only after historical packets were received;
+  for metadata-only history, Goose still sends the result ACK and records it as metadata-only.
+- NOOP's current no-trim trial is stricter: it suppresses WHOOP 5 ACKs until body packets appear.
+  Hardware showed the strap then repeats the same HISTORY_END cursor and eventually times out.
+
 ## Next Steps
 
 1. Capture and decode `type54` samples.

@@ -1002,6 +1002,7 @@ class WhoopBleClient(
 
             "COMMAND_RESPONSE" -> {
                 doubleValue(parsed.parsed["battery_pct"])?.let { setBattery(it) }
+                handleCommandResponse(parsed.parsed)
             }
 
             "EVENT" -> {
@@ -1032,6 +1033,17 @@ class WhoopBleClient(
             }
 
             else -> { /* ignore other packet types here (handled by the data layer in the full app) */ }
+        }
+    }
+
+    private fun handleCommandResponse(parsed: Map<String, Any?>) {
+        if (connectedFamily != DeviceFamily.WHOOP5 || !backfilling) return
+        if (!ConnectionSubscriptionPolicy.waitForDataRangeSuccessBeforeHistoricalTransfer(connectedFamily)) return
+        val responseCommand = parsed["resp_cmd"] as? String ?: return
+        val result = parsed["result"] as? String ?: return
+        if (responseCommand.startsWith("GET_DATA_RANGE") && result.startsWith("SUCCESS")) {
+            log("Backfill: WHOOP 5/MG GET_DATA_RANGE success — requesting historical data.")
+            send(CommandNumber.SEND_HISTORICAL_DATA, byteArrayOf(), withResponse = true)
         }
     }
 
@@ -1571,9 +1583,13 @@ class WhoopBleClient(
             if (whoop5HistoryAttempts == 1) whoop5HistoricalPacketsThisSession = 0
             whoop5BackfillCaptureSummary.reset()
             send(CommandNumber.GET_DATA_RANGE, byteArrayOf(), withResponse = true)
-            handler.postDelayed({
-                if (backfilling) send(CommandNumber.SEND_HISTORICAL_DATA, byteArrayOf(), withResponse = true)
-            }, WHOOP5_HISTORY_TRANSFER_DELAY_MS)
+            if (!ConnectionSubscriptionPolicy.waitForDataRangeSuccessBeforeHistoricalTransfer(connectedFamily)) {
+                handler.postDelayed({
+                    if (backfilling) {
+                        send(CommandNumber.SEND_HISTORICAL_DATA, byteArrayOf(), withResponse = true)
+                    }
+                }, WHOOP5_HISTORY_TRANSFER_DELAY_MS)
+            }
         } else {
             send(CommandNumber.SEND_HISTORICAL_DATA, byteArrayOf(0), withResponse = true)
         }
@@ -1696,6 +1712,17 @@ class WhoopBleClient(
      * metadata.data[10:18]. Port of `BLEManager.ackHistoricalChunk`.
      */
     private fun ackHistoricalChunk(trim: Long, endData: ByteArray) {
+        if (!ConnectionSubscriptionPolicy.shouldAckHistoricalTrim(
+                family = connectedFamily,
+                bodyPacketsSeen = whoop5HistoricalPacketsThisSession,
+            )
+        ) {
+            log(
+                "Backfill: suppress trim ack=$trim for ${connectedFamily.name}; " +
+                    "bodyPackets=$whoop5HistoricalPacketsThisSession",
+            )
+            return
+        }
         val payload = ByteArray(1 + endData.size)
         payload[0] = 0x01
         System.arraycopy(endData, 0, payload, 1, endData.size)

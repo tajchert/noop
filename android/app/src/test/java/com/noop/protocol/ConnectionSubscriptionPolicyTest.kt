@@ -33,4 +33,17 @@ class ConnectionSubscriptionPolicyTest {
         assertTrue(ConnectionSubscriptionPolicy.preferBondedDirectConnect(DeviceFamily.WHOOP5))
         assertFalse(ConnectionSubscriptionPolicy.preferBondedDirectConnect(DeviceFamily.WHOOP4))
     }
+
+    @Test
+    fun whoop5WaitsForRangeSuccessBeforeHistoricalTransfer() {
+        assertTrue(ConnectionSubscriptionPolicy.waitForDataRangeSuccessBeforeHistoricalTransfer(DeviceFamily.WHOOP5))
+        assertFalse(ConnectionSubscriptionPolicy.waitForDataRangeSuccessBeforeHistoricalTransfer(DeviceFamily.WHOOP4))
+    }
+
+    @Test
+    fun whoop5AcksMetadataOnlyHistoryButDoesNotTrimBodyPacketsYet() {
+        assertTrue(ConnectionSubscriptionPolicy.shouldAckHistoricalTrim(DeviceFamily.WHOOP5, bodyPacketsSeen = 0))
+        assertFalse(ConnectionSubscriptionPolicy.shouldAckHistoricalTrim(DeviceFamily.WHOOP5, bodyPacketsSeen = 1))
+        assertTrue(ConnectionSubscriptionPolicy.shouldAckHistoricalTrim(DeviceFamily.WHOOP4, bodyPacketsSeen = 0))
+    }
 }

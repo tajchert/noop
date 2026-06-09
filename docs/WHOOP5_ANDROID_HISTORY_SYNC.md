@@ -156,14 +156,47 @@ classify/decode, or it may be unrelated telemetry that happens during backfill.
 
 ## Next Steps
 
-1. Decode `type54` samples.
+## 2026-06-10 Hardware Note
+
+After repeated Android `status=133` failures on the first protected GATT operation, the tested
+WHOOP 5.0 band succeeded when NOOP connected directly to Android's already-bonded WHOOP device
+instead of scan-only reconnecting.
+
+Observed sequence:
+
+```text
+Connecting directly to bonded WHOOP 5.0 / MG WHOOP 5AG0081917
+WHOOP 5/MG: CLIENT_HELLO acked
+Subscribed fd4b0003...
+Subscribed fd4b0004...
+Subscribed fd4b0005...
+Subscribed fd4b0007...
+-> GET_DATA_RANGE
+COMMAND_RESPONSE GET_DATA_RANGE result=PENDING
+COMMAND_RESPONSE GET_DATA_RANGE result=SUCCESS
+-> SEND_HISTORICAL_DATA
+COMMAND_RESPONSE SEND_HISTORICAL_DATA result=SUCCESS
+-> HISTORICAL_DATA_RESULT ... result=SUCCESS
+```
+
+The first direct connect attempt can still time out with `Confirmed write failed: status=133`.
+The automatic reconnect now reuses the bonded device and the second attempt reached the working
+Puffin session. This is still a hardware-tested workaround, not a final root-cause fix.
+
+## Next Steps
+
+1. Capture and decode `type54` samples.
+   - Android now logs a compact WHOOP 5 backfill summary at session end:
+     `Backfill: WHOOP 5/MG summary ... counts=...`
+   - It also logs a bounded list of unknown packet samples:
+     `Backfill: WHOOP 5/MG unknown samples=...`
+   - Reconnect until `type54` appears in that summary, then use the retained hex samples for parser work.
    - Compare byte layout against Goose's parsers and any captured WHOOP 5 history fixtures.
    - Decide whether it is historical progress, physiological body data, or unrelated telemetry.
 
-2. Add better backfill telemetry.
-   - Log per-type counts at backfill end.
-   - Log first N samples for unknown packet types with frame size, characteristic, and hex.
-   - Consider persisting a debug capture file/export for offline analysis.
+2. Consider persisting a debug capture file/export for offline analysis.
+   - The current summary is logcat-only.
+   - A shareable capture would avoid long adb sessions and make user reports more useful.
 
 3. Align command sequencing with Goose.
    - Android currently sends `SEND_HISTORICAL_DATA` after a delay.

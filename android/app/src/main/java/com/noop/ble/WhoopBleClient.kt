@@ -26,7 +26,9 @@ import com.noop.data.RrRow
 import com.noop.data.StreamBatch
 import com.noop.data.StreamPersistence
 import com.noop.data.WhoopRepository
+import com.noop.protocol.BackfillCaptureSummary
 import com.noop.protocol.CommandNumber
+import com.noop.protocol.ConnectionSubscriptionPolicy
 import com.noop.protocol.DeviceFamily
 import com.noop.protocol.Framing
 import com.noop.protocol.HistoricalFrameClassifier
@@ -356,6 +358,7 @@ class WhoopBleClient(
     private var backfillStarted = false
     private var whoop5HistoryAttempts = 0
     private var whoop5HistoricalPacketsThisSession = 0
+    private val whoop5BackfillCaptureSummary = BackfillCaptureSummary()
 
     /** Newest unix the strap reports having (from GET_DATA_RANGE); refreshed each connect. */
     @Volatile
@@ -452,6 +455,22 @@ class WhoopBleClient(
             _state.value = _state.value.copy(statusNote = "Bluetooth isn't ready yet. Try again in a moment.")
             return
         }
+        val directFamily = when (model) {
+            WhoopModel.WHOOP4 -> DeviceFamily.WHOOP4
+            WhoopModel.WHOOP5_MG -> DeviceFamily.WHOOP5
+        }
+        if (ConnectionSubscriptionPolicy.preferBondedDirectConnect(directFamily)) {
+            val bonded = bondedWhoopDevice(model)
+            if (bonded != null) {
+                log("Connecting directly to bonded ${model.displayName} ${bonded.name ?: bonded.address}")
+                _state.value = _state.value.copy(
+                    scanning = false,
+                    statusNote = "Connecting to bonded ${model.displayName}…",
+                )
+                connectToDevice(bonded)
+                return
+            }
+        }
         if (scanning) {
             log("Scan already in progress — ignoring")
             return
@@ -490,6 +509,24 @@ class WhoopBleClient(
         // Stop and explain if nothing turns up in time.
         handler.removeCallbacks(scanTimeoutRunnable)
         handler.postDelayed(scanTimeoutRunnable, SCAN_TIMEOUT_MS)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun bondedWhoopDevice(model: WhoopModel): BluetoothDevice? {
+        val adp = adapter ?: return null
+        return try {
+            adp.bondedDevices
+                ?.firstOrNull { device ->
+                    val name = device.name.orEmpty()
+                    when (model) {
+                        WhoopModel.WHOOP4 -> name.startsWith("WHOOP 4", ignoreCase = true)
+                        WhoopModel.WHOOP5_MG -> name.startsWith("WHOOP 5", ignoreCase = true)
+                    }
+                }
+        } catch (se: SecurityException) {
+            log("Bonded device lookup blocked (permission): ${se.message}")
+            null
+        }
     }
 
     /**
@@ -714,7 +751,7 @@ class WhoopBleClient(
             // Port of didDiscoverServices → didDiscoverCharacteristicsFor, collapsed: Android
             // delivers ALL services+characteristics in one callback, so we walk them directly.
 
-            // 1. Custom service: capture the cmd-write char, FIRE THE BOND, queue the notify subs.
+            // 1. Custom service: capture the cmd-write char and queue family notify subscriptions.
             val whoop4 = g.getService(WHOOP4_SERVICE)
             val whoop5 = g.getService(WHOOP5_SERVICE)
             if (whoop4 != null) {
@@ -730,12 +767,11 @@ class WhoopBleClient(
                 whoop4.getCharacteristic(EVENT_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
                 whoop4.getCharacteristic(DATA_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
             } else if (whoop5 != null) {
-                // EXPERIMENTAL WHOOP 5.0/MG: opens with CLIENT_HELLO after standard HR/battery
-                // subscriptions. On the tested OnePlus stack this ordering lets the encrypted write
-                // complete; writing CLIENT_HELLO first timed out with GATT 133 even though the OS bond
-                // existed.
+                // EXPERIMENTAL WHOOP 5.0/MG: keep CCCD writes out of the pre-hello path. Test hardware
+                // showed both standard 0x2A37 and Puffin fd4b0003 can fail with status=133 before
+                // CLIENT_HELLO and drop the link. Open the session first, then subscribe notifications.
                 connectedFamily = DeviceFamily.WHOOP5
-                log("WHOOP 5/MG detected — will send CLIENT_HELLO after subscribing (experimental).")
+                log("WHOOP 5/MG detected — will send CLIENT_HELLO before notifications (experimental).")
                 _state.value = _state.value.copy(
                     whoop5Detected = true,
                     statusNote = "WHOOP 5/MG connected — experimental. After bonding, NOOP brings up live " +
@@ -743,6 +779,9 @@ class WhoopBleClient(
                         "sleep) for 5/MG are still being figured out. WHOOP 4.0 is fully supported today.",
                 )
                 cmdCharacteristic = whoop5.getCharacteristic(WHOOP5_CMD_WRITE_CHAR)
+                if (ConnectionSubscriptionPolicy.queueFamilyNotificationsBeforeSession(DeviceFamily.WHOOP5)) {
+                    for (u in WHOOP5_NOTIFY_CHARS) whoop5.getCharacteristic(u)?.let { cccdQueue.add(it) }
+                }
             } else {
                 log("Custom WHOOP service not found on this peripheral")
             }
@@ -751,11 +790,13 @@ class WhoopBleClient(
             reassembler = Reassembler(connectedFamily)
             backfiller.family = connectedFamily
 
-            // 2. Standard HR profile (works unbonded — the reliable HR + R-R source).
-            g.getService(HEART_RATE_SERVICE)?.getCharacteristic(HEART_RATE_CHAR)?.let { cccdQueue.add(it) }
+            if (ConnectionSubscriptionPolicy.queueStandardProfilesBeforeSession(connectedFamily)) {
+                // 2. Standard HR profile (WHOOP 4 reliable HR + R-R source).
+                g.getService(HEART_RATE_SERVICE)?.getCharacteristic(HEART_RATE_CHAR)?.let { cccdQueue.add(it) }
 
-            // 3. Standard battery profile (plain %).
-            g.getService(BATTERY_SERVICE)?.getCharacteristic(BATTERY_CHAR)?.let { cccdQueue.add(it) }
+                // 3. Standard battery profile (plain %).
+                g.getService(BATTERY_SERVICE)?.getCharacteristic(BATTERY_CHAR)?.let { cccdQueue.add(it) }
+            }
 
             // Enable notifications one at a time. When the queue is fully drained, startSession() fires
             // the first command (bond / CLIENT_HELLO) — never racing the descriptor writes.
@@ -772,13 +813,12 @@ class WhoopBleClient(
                 log("Confirmed write failed: status=$status")
             } else if (!didBond && connectedFamily == DeviceFamily.WHOOP5) {
                 // EXPERIMENTAL (issue #17): the CLIENT_HELLO is now a confirmed write, so this ACK means
-                // just-works bonding completed. Now subscribe the puffin notify chars (realtime HR rides
-                // these as REALTIME_DATA — the strap rejected them on the unauthenticated link), then arm
-                // realtime HR with puffin framing. Mirrors the macOS post-bond flow.
+                // just-works bonding completed. Now subscribe Puffin notify chars, arm realtime HR with
+                // Puffin framing, and start the historical sync.
                 didBond = true
                 connectHandshakeDone = true
                 _state.value = _state.value.copy(bonded = true)
-                log("WHOOP 5/MG: CLIENT_HELLO acked — link established; subscribing notify chars (experimental).")
+                log("WHOOP 5/MG: CLIENT_HELLO acked — subscribing Puffin channels (experimental).")
                 g.getService(WHOOP5_SERVICE)?.let { svc ->
                     for (u in WHOOP5_NOTIFY_CHARS) svc.getCharacteristic(u)?.let { cccdQueue.add(it) }
                 }
@@ -905,6 +945,13 @@ class WhoopBleClient(
                         val parsedForLog = Framing.parseFrame(frame, connectedFamily)
                         val offload = isOffloadFrame(frame, connectedFamily)
                         if (connectedFamily == DeviceFamily.WHOOP5) {
+                            whoop5BackfillCaptureSummary.record(
+                                typeName = parsedForLog.typeName,
+                                crcOk = parsedForLog.crcOk,
+                                size = frame.size,
+                                characteristic = uuid.toString(),
+                                hex = frame.toHex(),
+                            )
                             log(
                                 "Backfill: inbound ${parsedForLog.typeName} crc=${parsedForLog.crcOk} " +
                                     "offload=$offload size=${frame.size} char=$uuid " +
@@ -1162,10 +1209,14 @@ class WhoopBleClient(
                 svc.getCharacteristic(EVENT_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
                 svc.getCharacteristic(DATA_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
             }
-            DeviceFamily.WHOOP5 -> { /* 5/MG live HR rides the standard profile, re-subscribed below */ }
+            DeviceFamily.WHOOP5 -> g.getService(WHOOP5_SERVICE)?.let { svc ->
+                for (u in WHOOP5_NOTIFY_CHARS) svc.getCharacteristic(u)?.let { cccdQueue.add(it) }
+            }
         }
-        g.getService(HEART_RATE_SERVICE)?.getCharacteristic(HEART_RATE_CHAR)?.let { cccdQueue.add(it) }
-        g.getService(BATTERY_SERVICE)?.getCharacteristic(BATTERY_CHAR)?.let { cccdQueue.add(it) }
+        if (ConnectionSubscriptionPolicy.queueStandardProfilesBeforeSession(connectedFamily)) {
+            g.getService(HEART_RATE_SERVICE)?.getCharacteristic(HEART_RATE_CHAR)?.let { cccdQueue.add(it) }
+            g.getService(BATTERY_SERVICE)?.getCharacteristic(BATTERY_CHAR)?.let { cccdQueue.add(it) }
+        }
         drainCccdQueue(g)
     }
 
@@ -1347,6 +1398,24 @@ class WhoopBleClient(
         }
     }
 
+    private fun scheduleStartSession(g: BluetoothGatt) {
+        if (sessionStarted) return
+        val delayMs = ConnectionSubscriptionPolicy.sessionStartDelayMs(connectedFamily)
+        if (delayMs <= 0L) {
+            startSession(g)
+            return
+        }
+        val familyAtSchedule = connectedFamily
+        log("WHOOP 5/MG: waiting ${delayMs}ms for encrypted link before CLIENT_HELLO (experimental).")
+        handler.postDelayed({
+            if (gatt === g && _state.value.connected && connectedFamily == familyAtSchedule) {
+                startSession(g)
+            } else {
+                log("WHOOP 5/MG: skipped delayed CLIENT_HELLO because connection changed.")
+            }
+        }, delayMs)
+    }
+
     @SuppressLint("MissingPermission")
     private fun drainCccdQueue(g: BluetoothGatt) {
         // All GATT mutations must run on the one thread the callbacks are pinned to (the main looper,
@@ -1361,7 +1430,7 @@ class WhoopBleClient(
             // Every notification is enabled — now it's safe to write the first command, one GATT
             // operation at a time. This is the fix for issue #12: the bond/hello no longer races the
             // CCCD descriptor writes (which had silently dropped every subscription).
-            startSession(g)
+            scheduleStartSession(g)
             return
         }
         cccdInFlight = true
@@ -1500,6 +1569,7 @@ class WhoopBleClient(
         if (connectedFamily == DeviceFamily.WHOOP5) {
             whoop5HistoryAttempts += 1
             if (whoop5HistoryAttempts == 1) whoop5HistoricalPacketsThisSession = 0
+            whoop5BackfillCaptureSummary.reset()
             send(CommandNumber.GET_DATA_RANGE, byteArrayOf(), withResponse = true)
             handler.postDelayed({
                 if (backfilling) send(CommandNumber.SEND_HISTORICAL_DATA, byteArrayOf(), withResponse = true)
@@ -1583,6 +1653,7 @@ class WhoopBleClient(
             _state.value.connected &&
             _state.value.bonded
         ) {
+            logWhoop5BackfillSummary("retry")
             backfilling = false
             handler.removeCallbacks(backfillTimeoutRunnable)
             backfillFrameQueue.clear()
@@ -1602,7 +1673,18 @@ class WhoopBleClient(
         backfilling = false
         handler.removeCallbacks(backfillTimeoutRunnable)
         backfillFrameQueue.clear()
+        logWhoop5BackfillSummary(reason)
         log("Backfill: session ended — reason=$reason")
+    }
+
+    private fun logWhoop5BackfillSummary(reason: String) {
+        if (connectedFamily != DeviceFamily.WHOOP5) return
+        log(
+            "Backfill: WHOOP 5/MG summary reason=$reason attempts=$whoop5HistoryAttempts " +
+                "bodyPackets=$whoop5HistoricalPacketsThisSession " +
+                "counts=${whoop5BackfillCaptureSummary.countsText()}",
+        )
+        log("Backfill: WHOOP 5/MG unknown samples=${whoop5BackfillCaptureSummary.unknownSamplesText()}")
     }
 
     /**
@@ -1666,6 +1748,7 @@ class WhoopBleClient(
         backfillStarted = false
         whoop5HistoryAttempts = 0
         whoop5HistoricalPacketsThisSession = 0
+        whoop5BackfillCaptureSummary.reset()
         backfilling = false
         backfillDraining = false
         backfillFrameQueue.clear()

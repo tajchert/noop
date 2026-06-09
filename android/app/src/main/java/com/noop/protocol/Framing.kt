@@ -180,6 +180,14 @@ object Framing {
     private fun commandLabel(v: Int): String =
         CommandNumber.fromRaw(v)?.let { "${it.name}($v)" } ?: hexLabel(v)
 
+    private fun commandResultLabel(v: Int): String = when (v) {
+        0 -> "FAILURE(0)"
+        1 -> "SUCCESS(1)"
+        2 -> "PENDING(2)"
+        3 -> "UNSUPPORTED(3)"
+        else -> hexLabel(v)
+    }
+
     private fun hexLabel(v: Int): String = "0x%02X(%d)".format(v, v)
 
     // MARK: - parse
@@ -230,6 +238,9 @@ object Framing {
         // their per-type 5.0 offsets are confirmed on hardware — we don't invent offsets.
         when (name) {
             "REALTIME_DATA" -> decodeRealtimeWhoop5(frame, parsed)
+            "EVENT" -> decodeEventWhoop5(frame, parsed)
+            "COMMAND_RESPONSE" -> decodeCommandResponseWhoop5(frame, parsed)
+            "METADATA" -> decodeMetadataWhoop5(frame, parsed)
             else -> Unit
         }
         return ParsedFrame(ok = true, crcOk = check.crc32Ok, typeName = name, parsed = parsed)
@@ -252,6 +263,46 @@ object Framing {
             if (v != null && v > 0) rrs.add(v)   // drop 0 ms placeholders, matching 4.0 / Swift
         }
         parsed["rr_intervals"] = rrs
+    }
+
+    /**
+     * METADATA for WHOOP 5.0 — the 4.0 metadata layout shifted by +4 for normal METADATA(49):
+     * meta_type@10, payload@11. This is the minimal decode the historical state machine needs for
+     * HISTORY_START / HISTORY_END / HISTORY_COMPLETE.
+     */
+    private fun decodeMetadataWhoop5(frame: ByteArray, parsed: MutableMap<String, Any?>) {
+        val mt = frame.u8(10) ?: return
+        parsed["meta_type"] = metaLabel(mt)
+        val payloadEnd = frame.size - 4
+        if (payloadEnd <= 11) return
+        val pay = frame.copyOfRange(11, payloadEnd)
+        if (pay.size >= 14) {
+            val unix = (pay[0].toLong() and 0xFFL) or ((pay[1].toLong() and 0xFFL) shl 8) or
+                ((pay[2].toLong() and 0xFFL) shl 16) or ((pay[3].toLong() and 0xFFL) shl 24)
+            val ss = (pay[4].toInt() and 0xFF) or ((pay[5].toInt() and 0xFF) shl 8)
+            val trim = (pay[10].toLong() and 0xFFL) or ((pay[11].toLong() and 0xFFL) shl 8) or
+                ((pay[12].toLong() and 0xFFL) shl 16) or ((pay[13].toLong() and 0xFFL) shl 24)
+            parsed["unix"] = unix.toInt()
+            parsed["subsec"] = ss
+            parsed["trim_cursor"] = trim.toInt()
+        }
+    }
+
+    /** EVENT for WHOOP 5.0 — the 4.0 event layout shifted by +4: event@10, timestamp@12. */
+    private fun decodeEventWhoop5(frame: ByteArray, parsed: MutableMap<String, Any?>) {
+        val evVal = frame.u8(10) ?: return
+        parsed["event"] = eventLabel(evVal)
+        frame.u32(12)?.let { parsed["event_timestamp"] = it.toInt() }
+    }
+
+    /** COMMAND_RESPONSE for WHOOP 5.0 — Goose observes payload[2]=cmd, payload[3]=seq, payload[4]=result. */
+    private fun decodeCommandResponseWhoop5(frame: ByteArray, parsed: MutableMap<String, Any?>) {
+        val cmd = frame.u8(10) ?: return
+        val seq = frame.u8(11) ?: return
+        val result = frame.u8(12) ?: return
+        parsed["resp_cmd"] = commandLabel(cmd)
+        parsed["resp_seq"] = seq
+        parsed["result"] = commandResultLabel(result)
     }
 
     // MARK: - per-type decoders (Whoop 4.0). Ported from PostHooks.swift + the static field specs.
@@ -385,11 +436,10 @@ object Framing {
     /**
      * EXPERIMENTAL: build a WHOOP 5.0/MG ("puffin") command frame in the CRC16 envelope.
      *
-     * Direct port of the Swift `puffinCommandFrame` (WhoopProtocol/Framing.swift). The inner record
-     * is `[type][seq][cmd] + payload`; `declLen = inner.size + 4` (the CRC32 tail); the CRC16-Modbus
-     * covers the first six header bytes. `type` defaults to 35 (COMMAND) and `header` to `[0x00,
-     * 0x01]`, mirroring the structure of the only puffin frame we know a real strap accepts (the
-     * static CLIENT_HELLO). The returned frame round-trips through `parseFrame(frame, WHOOP5)`.
+     * Direct port of Goose's `buildV5CommandFrame`. The inner record is `[type][seq][cmd] + payload`,
+     * padded to a 4-byte boundary before the CRC32 is calculated. `declLen = inner.size + 4` (the
+     * CRC32 tail); the CRC16-Modbus covers the first six header bytes. `type` defaults to 35 (COMMAND)
+     * and `header` to `[0x00, 0x01]`. The returned frame round-trips through `parseFrame(frame, WHOOP5)`.
      *
      * Layout (LE = little-endian):
      *   inner  = [type][seq][cmd] + payload
@@ -406,7 +456,9 @@ object Framing {
         type: Int = PacketType.COMMAND.rawValue,   // 35
         header: ByteArray = byteArrayOf(0x00, 0x01),
     ): ByteArray {
-        val inner = ByteArray(3 + payload.size)
+        val unpaddedSize = 3 + payload.size
+        val padding = if (unpaddedSize % 4 == 0) 0 else 4 - (unpaddedSize % 4)
+        val inner = ByteArray(unpaddedSize + padding)
         inner[0] = (type and 0xFF).toByte()
         inner[1] = (seq and 0xFF).toByte()
         inner[2] = (cmd and 0xFF).toByte()

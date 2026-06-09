@@ -116,6 +116,40 @@ class FramingTest {
         assertEquals(wantCrc32, gotCrc32)
     }
 
+    @Test
+    fun puffinCommandFrame_emptyHistoricalCommandsMatchGoose() {
+        val getRange = Framing.puffinCommandFrame(
+            cmd = CommandNumber.GET_DATA_RANGE.rawValue,
+            seq = 1,
+            payload = byteArrayOf(),
+        )
+        val sendHistorical = Framing.puffinCommandFrame(
+            cmd = CommandNumber.SEND_HISTORICAL_DATA.rawValue,
+            seq = 2,
+            payload = byteArrayOf(),
+        )
+
+        assertEquals("aa0108000001e67123012200dbf3b335", hex(getRange))
+        assertEquals("aa0108000001e6712302160075bedf8c", hex(sendHistorical))
+    }
+
+    @Test
+    fun parseWhoop5CommandResponseUsesPuffinOffsets() {
+        val frame = Framing.puffinCommandFrame(
+            cmd = CommandNumber.GET_DATA_RANGE.rawValue,
+            seq = 0,
+            payload = byteArrayOf(7, 1),
+            type = PacketType.COMMAND_RESPONSE.rawValue,
+        )
+
+        val parsed = Framing.parseFrame(frame, DeviceFamily.WHOOP5)
+
+        assertEquals("COMMAND_RESPONSE", parsed.typeName)
+        assertEquals("GET_DATA_RANGE(34)", parsed.parsed["resp_cmd"])
+        assertEquals(7, parsed.parsed["resp_seq"])
+        assertEquals("SUCCESS(1)", parsed.parsed["result"])
+    }
+
     // MARK: - parseFrame decode vectors
 
     @Test

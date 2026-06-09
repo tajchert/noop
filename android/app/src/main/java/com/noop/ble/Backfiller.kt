@@ -4,6 +4,7 @@ import android.content.Context
 import com.noop.data.WhoopRepository
 import com.noop.protocol.DeviceFamily
 import com.noop.protocol.Framing
+import com.noop.protocol.HistoricalFrameClassifier
 import com.noop.protocol.HistoricalMeta
 import com.noop.protocol.classifyHistoricalMeta
 import com.noop.protocol.extractHistoricalStreams
@@ -57,7 +58,7 @@ class Backfiller(
      * correct wall time. Settable by [WhoopBleClient] if a real correlation lands.
      */
     var clockRef: ClockRef = ClockRef.identityNow(),
-    private val family: DeviceFamily = DeviceFamily.WHOOP4,
+    var family: DeviceFamily = DeviceFamily.WHOOP4,
 ) {
 
     /** True while a historical offload session is active. */
@@ -127,7 +128,7 @@ class Backfiller(
      * this END become the next chunk. An END with no records is still acked (advances the trim).
      */
     private suspend fun finishChunk(unix: Long, trim: Long, endFrame: ByteArray) {
-        val endData = endData(endFrame) ?: return
+        val endData = endData(endFrame, family) ?: return
 
         val frames = synchronized(chunkLock) {
             val snapshot = ArrayList(chunk)
@@ -180,10 +181,8 @@ class Backfiller(
          * too short (a real HISTORY_END is >= 14 data bytes; this guards a malformed frame).
          * Port of Swift `Backfiller.endData(from:)`.
          */
-        fun endData(frame: ByteArray): ByteArray? {
-            if (frame.size < 25) return null
-            return frame.copyOfRange(17, 25)
-        }
+        fun endData(frame: ByteArray, family: DeviceFamily = DeviceFamily.WHOOP4): ByteArray? =
+            HistoricalFrameClassifier.historyEndAckData(frame, family)
     }
 }
 

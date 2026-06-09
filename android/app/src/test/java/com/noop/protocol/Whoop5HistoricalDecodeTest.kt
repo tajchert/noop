@@ -26,6 +26,10 @@ class Whoop5HistoricalDecodeTest {
     private val offWristV18 =
         "aa01740001003fb12f12803a3d84018889266a3d0a00000000000000000000000000000000000000000064c33b52b47d3fe1ba1dbda470ecbd000064000000000000000000e500e200c708000c010c020c0000000000000000000000000000000000000000000000010000008080000000000000000000009ffafe6c"
 
+    // Real Android WHOOP 5.0 frame from the ACK-enabled hardware offload capture.
+    private val androidAckCaptureV18 =
+        "aa01740001003fb12f1280aaae6f01bea0286ae11a004200000000000000000000b0000084414b38dc80b96c3c717d243dd7638f3ee182773ff6007e00000000000000000026013601a60c5004010c020c00000000000000000000000000000000000000000000010100a27c2521000000bff73ec00000002ce4150a"
+
     @Test
     fun decodesWhoop5V18CoreAndBiometrics() {
         val p = decodeHistorical(bytes(wornV18), DeviceFamily.WHOOP5)
@@ -55,6 +59,23 @@ class Whoop5HistoricalDecodeTest {
         val off = decodeHistorical(bytes(offWristV18), DeviceFamily.WHOOP5)!!
         assertEquals(3057, worn["skin_temp_raw"]) // ~30.6 °C on the wrist
         assertEquals(2247, off["skin_temp_raw"]) // ~22.5 °C off the wrist (ambient), still within guard
+    }
+
+    @Test
+    fun extractsRowsFromAndroidAckEnabledWhoop5Capture() {
+        val batch = extractHistoricalStreams(
+            rawFrames = listOf(bytes(androidAckCaptureV18)),
+            deviceClockRef = 0,
+            wallClockRef = 0,
+            family = DeviceFamily.WHOOP5,
+        )
+
+        assertEquals(listOf(com.noop.data.HrRow(1781047486L, 66)), batch.hr)
+        assertEquals(listOf(com.noop.data.SkinTempRow(1781047486L, 3238)), batch.skinTemp)
+        assertEquals(1, batch.gravity.size)
+        val g = batch.gravity.single()
+        assertEquals(1781047486L, g.ts)
+        assertEquals(1.0, sqrt(g.x * g.x + g.y * g.y + g.z * g.z), 0.05)
     }
 
     @Test

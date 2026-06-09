@@ -21,7 +21,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
+import com.noop.analytics.IntelligenceEngine
+import com.noop.analytics.UserProfile
 import com.noop.data.HrRow
+import com.noop.data.InsertCounts
 import com.noop.data.RrRow
 import com.noop.data.StreamBatch
 import com.noop.data.StreamPersistence
@@ -43,6 +46,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -52,6 +56,7 @@ import java.io.File
 import java.io.FileWriter
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Immutable snapshot of the live connection + biometric state.
@@ -207,6 +212,8 @@ class WhoopBleClient(
         private const val BACKFILL_IDLE_TIMEOUT_MS = 60_000L
         /** Deferral before the first connect-time offload, so SET_CLOCK/GET_DATA_RANGE round-trip first. */
         private const val INITIAL_BACKFILL_DELAY_MS = 1_500L
+        /** Debounce derived scoring after raw-history commits; chunks arrive back-to-back. */
+        private const val POST_BACKFILL_ANALYZE_DELAY_MS = 1_500L
         /** WHOOP 5/MG: delay between GET_DATA_RANGE and SEND_HISTORICAL_DATA in the experimental flow. */
         private const val WHOOP5_HISTORY_TRANSFER_DELAY_MS = 700L
         /** Goose parity: one retry after an idle 5/MG history attempt with no packet bodies. */
@@ -357,6 +364,7 @@ class WhoopBleClient(
         deviceId = deviceId,
         cursorStore = cursorStore,
         ackTrim = { trim, endData -> ackHistoricalChunk(trim, endData) },
+        onChunkCommitted = { streams, counts -> onBackfillChunkCommitted(streams, counts) },
     )
 
     /** True while a historical offload is in progress (offload frames route to the Backfiller). */
@@ -368,6 +376,7 @@ class WhoopBleClient(
     private var whoop5HistoryAttempts = 0
     private var whoop5HistoricalPacketsThisSession = 0
     private val whoop5BackfillCaptureSummary = BackfillCaptureSummary()
+    private val analyzeAfterBackfillScheduled = AtomicBoolean(false)
     private var whoop5BackfillCaptureWriter: BufferedWriter? = null
     private var whoop5BackfillCaptureSessionId: String = ""
     private var whoop5BackfillCaptureLines = 0
@@ -1688,6 +1697,34 @@ class WhoopBleClient(
                 }
             }
             backfillDraining = false
+        }
+    }
+
+    private fun onBackfillChunkCommitted(streams: StreamBatch, counts: InsertCounts) {
+        val decoded = streams.hr.size + streams.rr.size + streams.resp.size + streams.gravity.size +
+            streams.skinTemp.size + streams.spo2.size + streams.events.size + streams.battery.size
+        log(
+            "Backfill: committed rows hr=${counts.hr} rr=${counts.rr} skin=${counts.skinTemp} " +
+                "resp=${counts.resp} gravity=${counts.gravity} events=${counts.events}",
+        )
+        if (decoded <= 0) return
+        if (!analyzeAfterBackfillScheduled.compareAndSet(false, true)) return
+        ioScope.launch {
+            try {
+                // Let Room finish invalidating flows and let consecutive HISTORY_END chunks coalesce.
+                delay(POST_BACKFILL_ANALYZE_DELAY_MS)
+                val computed = IntelligenceEngine.analyzeRecent(
+                    repo = repository,
+                    profile = UserProfile(),
+                    importedDeviceId = deviceId,
+                )
+                log("Backfill: on-device scoring wrote/updated ${computed.size} day(s)")
+            } catch (t: Throwable) {
+                Log.w(TAG, "Backfill: on-device scoring failed", t)
+                log("Backfill: on-device scoring failed: ${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                analyzeAfterBackfillScheduled.set(false)
+            }
         }
     }
 

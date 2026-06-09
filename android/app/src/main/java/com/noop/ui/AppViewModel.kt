@@ -1,6 +1,7 @@
 package com.noop.ui
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.noop.NoopApplication
@@ -132,6 +133,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         maxHROverride = profileStore.hrMaxOverride
                             .takeIf { it > 0 }?.toDouble(),
                     )
+                }.onSuccess { computed ->
+                    Log.i(TAG, "On-device scoring wrote/updated ${computed.size} day(s)")
+                }.onFailure { t ->
+                    Log.w(TAG, "On-device scoring failed", t)
                 }
                 delay(ANALYZE_INTERVAL_MS) // 15 min, matches the offload cadence
             }
@@ -276,6 +281,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private companion object {
+        const val TAG = "AppViewModel"
         /** Grace before the first scoring pass, letting the first BLE offload land. */
         const val FIRST_OFFLOAD_GRACE_MS = 6_000L
         /** On-device scoring cadence — 15 min, matching the strap offload cadence. */

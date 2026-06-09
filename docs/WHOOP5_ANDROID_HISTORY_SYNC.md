@@ -372,21 +372,59 @@ This validates the current transfer sequencing on real WHOOP 5 hardware:
 5. `SEND_HISTORICAL_DATA`
 6. ACK each `HISTORY_END`
 
-Remaining blocker: Android captures the WHOOP 5 `HISTORICAL_DATA` frames but does not yet decode those
-body packets into the persisted health streams that Today/Sleep/Recovery consume.
+Follow-up on the same capture showed Android decodes the WHOOP 5 `HISTORICAL_DATA` frames into raw
+health streams. A pulled debug database contained:
+
+```text
+hrSample         2463
+rrInterval       1432
+skinTempSample    246
+gravitySample     246
+dailyMetric         0
+sleepSession        0
+```
+
+So the remaining gap moved from BLE/history decode to derived metric scoring.
+
+### 2026-06-10 scoring hook result
+
+Added a post-backfill recompute hook: after a `HISTORY_END` chunk has decoded rows durably inserted,
+the trim cursor is persisted, and the ACK is queued, the process-owned BLE client debounces one
+`IntelligenceEngine.analyzeRecent(...)` run. The UI scoring loop now also logs success/failure instead
+of swallowing all outcomes.
+
+Hardware/device DB check after installing this build:
+
+```text
+AppViewModel: On-device scoring wrote/updated 1 day(s)
+
+hrSample       2678   2000-01-01 07:42:28 .. 2026-06-09 23:36:10
+rrInterval     1629   2000-01-01 09:42:17 .. 2026-06-09 23:36:10
+dailyMetric       1
+sleepSession      0
+
+dailyMetric:
+my-whoop-noop | 2026-06-09 | recovery=null | strain=0.0 | sleep=null
+```
+
+This validates raw WHOOP 5 history persistence and dashboard daily-row generation on the test phone.
+No sleep session was expected from this short awake capture; Sleep/Recovery still need an overnight
+hardware run with enough HR/RR/gravity data.
 
 3. Keep command sequencing aligned with Goose.
    - Android now waits for `GET_DATA_RANGE SUCCESS` before sending `SEND_HISTORICAL_DATA`.
    - The 2026-06-10 capture confirms this sequence on hardware.
 
-4. Decode WHOOP 5 `HISTORICAL_DATA` body packets.
+4. Continue validating WHOOP 5 `HISTORICAL_DATA` body packets.
    - ACK-enabled hardware run produced 246 `HISTORICAL_DATA` frames and `HISTORY_COMPLETE`.
-   - Compare the 124-byte frames against Goose's K-packet parser and add Android decode/persistence.
+   - Android now decodes/persists HR, RR, skin temperature, and gravity from the 124-byte v18 frames.
+   - Keep comparing against Goose for any unparsed body fields such as respiration/SpO2/workout data.
 
-5. Once body records decode and persist, validate UI data flow.
-   - Confirm rows appear in `hrSample`, `rrInterval`, `skinTempSample`, `respSample`, and
+5. Validate an overnight hardware run.
+   - Confirm fresh rows appear in `hrSample`, `rrInterval`, `skinTempSample`, `respSample`, and
      `gravitySample` as applicable.
-   - Confirm Today/Sleep/Recovery move from "No Data" on-device without a WHOOP export import.
+   - Confirm Today gets a non-empty computed daily row.
+   - Confirm Sleep/Recovery move from "No Data" after a real sleep window without a WHOOP export import.
 
 6. Only after successful real-hardware validation, prepare a PR/MR.
 

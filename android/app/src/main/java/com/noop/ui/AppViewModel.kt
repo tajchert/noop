@@ -58,12 +58,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Live connection + biometric snapshot, surfaced straight from the BLE client. */
     val live: StateFlow<LiveState> = ble.state
 
-    /** Which strap the user is pairing — drives the scan filter in [connect]. Defaults to WHOOP 4.0. */
-    private val _selectedModel = MutableStateFlow(WhoopModel.WHOOP4)
+    /** Which strap the user is pairing — drives the scan filter in [connect]. Persisted for Live. */
+    private val _selectedModel = MutableStateFlow(NoopPrefs.selectedWhoopModel(appContext))
     val selectedModel: StateFlow<WhoopModel> = _selectedModel.asStateFlow()
     fun setSelectedModel(model: WhoopModel) {
         if (model == _selectedModel.value) return
         _selectedModel.value = model
+        NoopPrefs.setSelectedWhoopModel(appContext, model)
         // Drop the previous strap's sticky bond/connection so the next scan targets the new family's
         // service and bonds it fresh (lets a user move between a WHOOP 4 and a 5/MG).
         ble.prepareForModelSwitch()

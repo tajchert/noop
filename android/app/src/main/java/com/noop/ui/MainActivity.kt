@@ -22,6 +22,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.noop.BuildConfig
+import com.noop.ble.WhoopModel
 import com.noop.data.DemoSeeder
 import com.noop.data.WhoopRepository
 import kotlinx.coroutines.Dispatchers
@@ -113,6 +114,9 @@ object NoopPrefs {
      *  "Share strap log" export) work regardless. See [com.noop.ble.WhoopBleClient.debugLogcat]. */
     const val KEY_DEBUG_LOGGING = "noop.debugLogging"
 
+    /** Last selected strap model on Live. Keeps WHOOP 5/MG selected after a successful setup. */
+    const val KEY_SELECTED_WHOOP_MODEL = "noop.selectedWhoopModel"
+
     fun of(context: Context): SharedPreferences =
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
@@ -131,6 +135,18 @@ object NoopPrefs {
     fun setDebugLogging(context: Context, enabled: Boolean) {
         of(context).edit().putBoolean(KEY_DEBUG_LOGGING, enabled).apply()
     }
+
+    fun selectedWhoopModel(context: Context): WhoopModel =
+        whoopModelFromPref(of(context).getString(KEY_SELECTED_WHOOP_MODEL, null))
+
+    fun setSelectedWhoopModel(context: Context, model: WhoopModel) {
+        of(context).edit().putString(KEY_SELECTED_WHOOP_MODEL, whoopModelPrefValue(model)).apply()
+    }
+
+    internal fun whoopModelFromPref(value: String?): WhoopModel =
+        WhoopModel.entries.firstOrNull { it.name == value } ?: WhoopModel.WHOOP4
+
+    internal fun whoopModelPrefValue(model: WhoopModel): String = model.name
 
     /** Smart alarm: arm the strap's firmware alarm to buzz at a wake time. Default off; default time 07:00. */
     const val KEY_SMART_ALARM = "noop.smartAlarmEnabled"

@@ -217,14 +217,14 @@ Goose comparison:
 
 ## Next Steps
 
-1. Capture and decode `type54` samples.
-   - Android now logs a compact WHOOP 5 backfill summary at session end:
-     `Backfill: WHOOP 5/MG summary ... counts=...`
-   - It also logs a bounded list of unknown packet samples:
-     `Backfill: WHOOP 5/MG unknown samples=...`
-   - Reconnect until `type54` appears in that summary, then use the retained hex samples for parser work.
-   - Compare byte layout against Goose's parsers and any captured WHOOP 5 history fixtures.
-   - Decide whether it is historical progress, physiological body data, or unrelated telemetry.
+1. Resolve why this hardware run reports zero historical data packets.
+   - The command and metadata sequence is correct, but the strap console reports:
+     `PullStats: Data: 0, Events: 82`.
+   - Check whether the app must set/sync the strap clock before history, because the firmware repeatedly
+     logs `RTC timestamp ... is invalid; not saving data to flash`.
+   - Check whether the requested history window is empty on this band, or whether data packets require
+     an additional WHOOP 5 command/subscription from Goose/OpenWhoop.
+   - Re-run after the band has worn history and compare `PullStats` across runs.
 
 2. Pull the WHOOP 5 raw backfill capture for offline analysis.
    - Android now writes each WHOOP 5 backfill frame to app-private JSONL while a backfill session is
@@ -234,14 +234,154 @@ Goose comparison:
    - The file is bounded to 20,000 lines and is overwritten at the start of each WHOOP 5 backfill
      session.
 
-3. Align command sequencing with Goose.
-   - Android currently sends `SEND_HISTORICAL_DATA` after a delay.
-   - Goose waits for successful `GET_DATA_RANGE` before sending `SEND_HISTORICAL_DATA`.
-   - The current hardware run succeeded anyway, but response-gated sequencing would be closer to Goose.
+### 2026-06-10 raw capture result
 
-4. Check whether acking every `HISTORY_END` is correct when no type-47/type-52 body packets arrive.
-   - Current acks are accepted.
-   - Need confirm this does not trim data before body decode catches up.
+Pulled local artifact: `whoop5-backfill-capture.jsonl` (not committed; hardware evidence only).
+
+The capture contained 89 frames:
+
+```text
+COMMAND_RESPONSE 7
+CONSOLE_LOGS     64
+EVENT            8
+METADATA         9
+REALTIME_DATA    1
+UNKNOWN          0
+```
+
+Command sequence was correct:
+
+```text
+GET_DATA_RANGE          PENDING
+GET_DATA_RANGE          SUCCESS
+SEND_HISTORICAL_DATA    SUCCESS
+HISTORICAL_DATA_RESULT  SUCCESS x4
+```
+
+Metadata sequence was also correct:
+
+```text
+HISTORY_START trim=82
+HISTORY_END   trim=4517
+HISTORY_START trim=82
+HISTORY_END   trim=4525
+HISTORY_START trim=82
+HISTORY_END   trim=4533
+HISTORY_START trim=82
+HISTORY_END   trim=4535
+HISTORY_COMPLETE
+```
+
+The decisive firmware console line was:
+
+```text
+BLE: PullStats: Data: 0, Events: 82, Bytes: 6120, Seconds: 3.530, Brate: 1733.7, Prate: 23.2
+```
+
+This means the strap accepted the history request and sent event/metadata history, but reported zero
+data packets for that transfer. That explains why Today/Sleep/Recovery stayed empty: there were no
+type-47/type-52/K-packet body records to persist in this run.
+
+Parser follow-up:
+
+- Android now decodes WHOOP 5 `CONSOLE_LOGS.console_text`.
+- Android now preserves WHOOP 5 `EVENT` payload bytes as `event_payload_hex` and `event_payload_u8`.
+- Tests use real frames from this hardware capture.
+
+### 2026-06-10 GATT-safe clock capture result
+
+After moving WHOOP 5 clock sync behind the Puffin CCCD subscription drain, logcat confirmed the
+commands were accepted by the strap:
+
+```text
+BLE_CMD: Command Set Clock {1781047476, 0}
+BLE_CMD: Command Get Clock {1781047476, 327}
+```
+
+This changed the history behavior materially: the strap emitted real `HISTORICAL_DATA` frames.
+
+```text
+COMMAND_RESPONSE 3
+CONSOLE_LOGS     31
+EVENT            6
+HISTORICAL_DATA  2
+METADATA         6
+REALTIME_DATA    70
+```
+
+The session then timed out because Android suppressed the first `HISTORY_END` ACK after seeing body
+packets:
+
+```text
+Backfill: suppress trim ack=4557 for WHOOP5; bodyPackets=2
+Backfill: WHOOP 5/MG summary reason=timeout attempts=1 bodyPackets=2
+```
+
+Next implementation step: ACK WHOOP 5 `HISTORY_END` even when body packets were seen, matching the
+normal Goose/default transfer flow. The raw JSONL capture is retained locally before ACKing so we have
+evidence for parser work.
+
+### 2026-06-10 ACK-enabled capture result
+
+After enabling WHOOP 5 `HISTORY_END` ACKs even after body packets, the transfer advanced through
+multiple trim cursors and reached `HISTORY_COMPLETE`.
+
+Pulled local artifact: `whoop5-backfill-capture-after-ack-enabled.jsonl` (not committed).
+
+```text
+COMMAND_RESPONSE 8
+CONSOLE_LOGS     48
+EVENT            8
+HISTORICAL_DATA  246
+METADATA         11
+REALTIME_DATA    1
+```
+
+ACK responses were accepted for five history chunks:
+
+```text
+HISTORICAL_DATA_RESULT SUCCESS seq=6
+HISTORICAL_DATA_RESULT SUCCESS seq=7
+HISTORICAL_DATA_RESULT SUCCESS seq=8
+HISTORICAL_DATA_RESULT SUCCESS seq=9
+HISTORICAL_DATA_RESULT SUCCESS seq=10
+```
+
+Metadata progressed:
+
+```text
+HISTORY_START trim=82
+HISTORY_END   trim=4558
+HISTORY_START trim=82
+HISTORY_END   trim=4562
+HISTORY_START trim=82
+HISTORY_END   trim=4566
+HISTORY_START trim=82
+HISTORY_END   trim=4570
+HISTORY_START trim=82
+HISTORY_END   trim=4574
+HISTORY_COMPLETE
+```
+
+This validates the current transfer sequencing on real WHOOP 5 hardware:
+
+1. `CLIENT_HELLO`
+2. subscribe Puffin notifications
+3. `SET_CLOCK` / `GET_CLOCK`
+4. `GET_DATA_RANGE`
+5. `SEND_HISTORICAL_DATA`
+6. ACK each `HISTORY_END`
+
+Remaining blocker: Android captures the WHOOP 5 `HISTORICAL_DATA` frames but does not yet decode those
+body packets into the persisted health streams that Today/Sleep/Recovery consume.
+
+3. Keep command sequencing aligned with Goose.
+   - Android now waits for `GET_DATA_RANGE SUCCESS` before sending `SEND_HISTORICAL_DATA`.
+   - The 2026-06-10 capture confirms this sequence on hardware.
+
+4. Decode WHOOP 5 `HISTORICAL_DATA` body packets.
+   - ACK-enabled hardware run produced 246 `HISTORICAL_DATA` frames and `HISTORY_COMPLETE`.
+   - Compare the 124-byte frames against Goose's K-packet parser and add Android decode/persistence.
 
 5. Once body records decode and persist, validate UI data flow.
    - Confirm rows appear in `hrSample`, `rrInterval`, `skinTempSample`, `respSample`, and

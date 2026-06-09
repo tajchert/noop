@@ -826,21 +826,16 @@ class WhoopBleClient(
                 log("Confirmed write failed: status=$status")
             } else if (!didBond && connectedFamily == DeviceFamily.WHOOP5) {
                 // EXPERIMENTAL (issue #17): the CLIENT_HELLO is now a confirmed write, so this ACK means
-                // just-works bonding completed. Now subscribe Puffin notify chars, arm realtime HR with
-                // Puffin framing, and start the historical sync.
+                // just-works bonding completed. Now subscribe Puffin notify chars; after those CCCD
+                // writes drain, run the WHOOP 5 clock handshake and start historical sync. Running
+                // commands before the descriptors finish makes Android reject the writes.
                 didBond = true
-                connectHandshakeDone = true
                 _state.value = _state.value.copy(bonded = true)
                 log("WHOOP 5/MG: CLIENT_HELLO acked — subscribing Puffin channels (experimental).")
                 g.getService(WHOOP5_SERVICE)?.let { svc ->
                     for (u in WHOOP5_NOTIFY_CHARS) svc.getCharacteristic(u)?.let { cccdQueue.add(it) }
                 }
                 drainCccdQueue(g)
-                backfillStarted = true
-                handler.postDelayed({ requestSync() }, INITIAL_BACKFILL_DELAY_MS)
-                startBackfillTimer()
-                startKeepAlive()
-                if (wantsRealtime) send(CommandNumber.TOGGLE_REALTIME_HR, byteArrayOf(1))
             } else if (!didBond && connectedFamily == DeviceFamily.WHOOP4) {
                 didBond = true
                 _state.value = _state.value.copy(bonded = true)
@@ -1169,6 +1164,17 @@ class WhoopBleClient(
         if (wantsRealtime) send(CommandNumber.TOGGLE_REALTIME_HR, byteArrayOf(1))
     }
 
+    /**
+     * WHOOP 5/MG opens with CLIENT_HELLO instead of the WHOOP 4 bond command, but it still needs the
+     * strap RTC synced before history. The generic WHOOP 4 handshake is intentionally not reused
+     * because several legacy commands are not validated on the Puffin transport.
+     */
+    private fun runWhoop5ConnectHandshake() {
+        send(CommandNumber.SET_CLOCK, setClockPayload(), withResponse = true)
+        send(CommandNumber.GET_CLOCK, byteArrayOf(), withResponse = true)
+        log("WHOOP 5/MG connect handshake sent (set-clock/get-clock)")
+    }
+
     // ====================================================================================
     // MARK: Live-stream keep-alive  (port of BLEManager.startKeepAlive / keepAliveFire)
     // ====================================================================================
@@ -1461,6 +1467,16 @@ class WhoopBleClient(
         if (cccdInFlight) return
         val ch = cccdQueue.poll()
         if (ch == null) {
+            if (connectedFamily == DeviceFamily.WHOOP5 && didBond && !connectHandshakeDone) {
+                connectHandshakeDone = true
+                runWhoop5ConnectHandshake()
+                backfillStarted = true
+                handler.postDelayed({ requestSync() }, INITIAL_BACKFILL_DELAY_MS)
+                startBackfillTimer()
+                startKeepAlive()
+                if (wantsRealtime) send(CommandNumber.TOGGLE_REALTIME_HR, byteArrayOf(1))
+                return
+            }
             // Every notification is enabled — now it's safe to write the first command, one GATT
             // operation at a time. This is the fix for issue #12: the bond/hello no longer races the
             // CCCD descriptor writes (which had silently dropped every subscription).

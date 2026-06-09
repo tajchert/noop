@@ -9,6 +9,8 @@ package com.noop.protocol
  */
 object Whoop5CommandPolicy {
     private val allowedCommands = setOf(
+        CommandNumber.SET_CLOCK,
+        CommandNumber.GET_CLOCK,
         CommandNumber.TOGGLE_REALTIME_HR,
         CommandNumber.RUN_HAPTICS_PATTERN,
         CommandNumber.GET_DATA_RANGE,
@@ -21,6 +23,7 @@ object Whoop5CommandPolicy {
     fun payloadFor(cmd: CommandNumber, requested: ByteArray): ByteArray? {
         if (!allows(cmd)) return null
         return when (cmd) {
+            CommandNumber.GET_CLOCK,
             CommandNumber.GET_DATA_RANGE,
             CommandNumber.SEND_HISTORICAL_DATA -> byteArrayOf()
             else -> requested

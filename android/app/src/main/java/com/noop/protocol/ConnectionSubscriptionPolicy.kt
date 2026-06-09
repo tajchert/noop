@@ -31,9 +31,10 @@ object ConnectionSubscriptionPolicy {
             DeviceFamily.WHOOP5 -> true
         }
 
+    @Suppress("UNUSED_PARAMETER")
     fun shouldAckHistoricalTrim(family: DeviceFamily, bodyPacketsSeen: Int): Boolean =
         when (family) {
             DeviceFamily.WHOOP4 -> true
-            DeviceFamily.WHOOP5 -> bodyPacketsSeen == 0
+            DeviceFamily.WHOOP5 -> true
         }
 }

@@ -239,6 +239,7 @@ object Framing {
         when (name) {
             "REALTIME_DATA" -> decodeRealtimeWhoop5(frame, parsed)
             "EVENT" -> decodeEventWhoop5(frame, parsed)
+            "CONSOLE_LOGS" -> decodeConsoleLogsWhoop5(frame, parsed)
             "COMMAND_RESPONSE" -> decodeCommandResponseWhoop5(frame, parsed)
             "METADATA" -> decodeMetadataWhoop5(frame, parsed)
             else -> Unit
@@ -293,6 +294,27 @@ object Framing {
         val evVal = frame.u8(10) ?: return
         parsed["event"] = eventLabel(evVal)
         frame.u32(12)?.let { parsed["event_timestamp"] = it.toInt() }
+        val payloadEnd = frame.size - 4
+        if (payloadEnd > 16) {
+            val payload = frame.copyOfRange(16, payloadEnd)
+            parsed["event_payload_hex"] = payload.toHexString()
+            parsed["event_payload_u8"] = payload.map { it.toInt() and 0xFF }
+        }
+    }
+
+    /**
+     * CONSOLE_LOGS for WHOOP 5.0. Hardware captures show a 13-byte record header after the inner
+     * packet type, followed by UTF-8 console text and an optional NUL terminator.
+     */
+    private fun decodeConsoleLogsWhoop5(frame: ByteArray, parsed: MutableMap<String, Any?>) {
+        val payloadEnd = frame.size - 4
+        val textStart = 21
+        if (payloadEnd <= textStart) return
+        val rawText = frame.copyOfRange(textStart, payloadEnd)
+        val nul = rawText.indexOf(0)
+        val textBytes = if (nul >= 0) rawText.copyOfRange(0, nul) else rawText
+        val text = textBytes.toString(Charsets.UTF_8)
+        if (text.isNotEmpty()) parsed["console_text"] = text
     }
 
     /** COMMAND_RESPONSE for WHOOP 5.0 — Goose observes payload[2]=cmd, payload[3]=seq, payload[4]=result. */
@@ -394,6 +416,8 @@ object Framing {
             parsed["trim_cursor"] = trim.toInt()
         }
     }
+
+    private fun ByteArray.toHexString(): String = joinToString("") { "%02x".format(it) }
 
     // MARK: - command building
 

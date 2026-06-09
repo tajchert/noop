@@ -41,9 +41,9 @@ class ConnectionSubscriptionPolicyTest {
     }
 
     @Test
-    fun whoop5AcksMetadataOnlyHistoryButDoesNotTrimBodyPacketsYet() {
+    fun whoop5AcksHistoryEndForMetadataOnlyAndBodyTransfers() {
         assertTrue(ConnectionSubscriptionPolicy.shouldAckHistoricalTrim(DeviceFamily.WHOOP5, bodyPacketsSeen = 0))
-        assertFalse(ConnectionSubscriptionPolicy.shouldAckHistoricalTrim(DeviceFamily.WHOOP5, bodyPacketsSeen = 1))
+        assertTrue(ConnectionSubscriptionPolicy.shouldAckHistoricalTrim(DeviceFamily.WHOOP5, bodyPacketsSeen = 1))
         assertTrue(ConnectionSubscriptionPolicy.shouldAckHistoricalTrim(DeviceFamily.WHOOP4, bodyPacketsSeen = 0))
     }
 }

@@ -9,7 +9,9 @@ import org.junit.Test
 class Whoop5CommandPolicyTest {
 
     @Test
-    fun allowsOnlyLiveHapticsAndHistoricalCommands() {
+    fun allowsOnlyClockLiveHapticsAndHistoricalCommands() {
+        assertTrue(Whoop5CommandPolicy.allows(CommandNumber.SET_CLOCK))
+        assertTrue(Whoop5CommandPolicy.allows(CommandNumber.GET_CLOCK))
         assertTrue(Whoop5CommandPolicy.allows(CommandNumber.TOGGLE_REALTIME_HR))
         assertTrue(Whoop5CommandPolicy.allows(CommandNumber.RUN_HAPTICS_PATTERN))
         assertTrue(Whoop5CommandPolicy.allows(CommandNumber.GET_DATA_RANGE))
@@ -30,6 +32,20 @@ class Whoop5CommandPolicyTest {
         assertArrayEquals(
             byteArrayOf(),
             Whoop5CommandPolicy.payloadFor(CommandNumber.SEND_HISTORICAL_DATA, byteArrayOf(0)),
+        )
+    }
+
+    @Test
+    fun gen5ClockCommandsUseExpectedPayloads() {
+        val setClock = byteArrayOf(1, 2, 3, 4, 0, 0, 0, 0)
+
+        assertArrayEquals(
+            setClock,
+            Whoop5CommandPolicy.payloadFor(CommandNumber.SET_CLOCK, setClock),
+        )
+        assertArrayEquals(
+            byteArrayOf(),
+            Whoop5CommandPolicy.payloadFor(CommandNumber.GET_CLOCK, byteArrayOf(0)),
         )
     }
 

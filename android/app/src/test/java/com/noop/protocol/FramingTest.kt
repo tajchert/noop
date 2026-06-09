@@ -150,6 +150,40 @@ class FramingTest {
         assertEquals("SUCCESS(1)", parsed.parsed["result"])
     }
 
+    @Test
+    fun parseWhoop5EventPreservesPayloadBytes() {
+        val frame = fromHex("aa011c00010023d130c61d00e61ab7698a390c000e0000000000e8020b000100d2803585")
+
+        val parsed = Framing.parseFrame(frame, DeviceFamily.WHOOP5)
+
+        assertEquals("EVENT", parsed.typeName)
+        assertEquals(true, parsed.crcOk)
+        assertEquals("0x1D(29)", parsed.parsed["event"])
+        assertEquals(1773607654, parsed.parsed["event_timestamp"])
+        assertEquals("8a390c000e0000000000e8020b000100", parsed.parsed["event_payload_hex"])
+        assertEquals(
+            listOf(138, 57, 12, 0, 14, 0, 0, 0, 0, 0, 232, 2, 11, 0, 1, 0),
+            parsed.parsed["event_payload_u8"],
+        )
+    }
+
+    @Test
+    fun parseWhoop5ConsoleLogsExtractsText() {
+        val frame = fromHex(
+            "aa014400010030b1329f02005319b769a93e340001486973746f726963616c20446174610a20" +
+                "35352c20323538313935393a20424c453a2068697374207472616e7366657220730039d91fe2",
+        )
+
+        val parsed = Framing.parseFrame(frame, DeviceFamily.WHOOP5)
+
+        assertEquals("CONSOLE_LOGS", parsed.typeName)
+        assertEquals(true, parsed.crcOk)
+        assertEquals(
+            "Historical Data\n 55, 2581959: BLE: hist transfer s",
+            parsed.parsed["console_text"],
+        )
+    }
+
     // MARK: - parseFrame decode vectors
 
     @Test

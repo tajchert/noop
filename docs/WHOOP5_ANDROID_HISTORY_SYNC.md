@@ -226,9 +226,13 @@ Goose comparison:
    - Compare byte layout against Goose's parsers and any captured WHOOP 5 history fixtures.
    - Decide whether it is historical progress, physiological body data, or unrelated telemetry.
 
-2. Consider persisting a debug capture file/export for offline analysis.
-   - The current summary is logcat-only.
-   - A shareable capture would avoid long adb sessions and make user reports more useful.
+2. Pull the WHOOP 5 raw backfill capture for offline analysis.
+   - Android now writes each WHOOP 5 backfill frame to app-private JSONL while a backfill session is
+     active: `files/whoop5-backfill-capture.jsonl`.
+   - Pull it after a hardware run with:
+     `adb exec-out run-as com.noop.whoop.debug cat files/whoop5-backfill-capture.jsonl > whoop5-backfill-capture.jsonl`
+   - The file is bounded to 20,000 lines and is overwritten at the start of each WHOOP 5 backfill
+     session.
 
 3. Align command sequencing with Goose.
    - Android currently sends `SEND_HISTORICAL_DATA` after a delay.

@@ -26,6 +26,8 @@ import com.noop.data.RrRow
 import com.noop.data.StreamBatch
 import com.noop.data.StreamPersistence
 import com.noop.data.WhoopRepository
+import com.noop.protocol.BackfillCaptureJsonl
+import com.noop.protocol.BackfillCaptureRecord
 import com.noop.protocol.BackfillCaptureSummary
 import com.noop.protocol.CommandNumber
 import com.noop.protocol.ConnectionSubscriptionPolicy
@@ -45,6 +47,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.BufferedWriter
+import java.io.File
+import java.io.FileWriter
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
@@ -206,6 +211,10 @@ class WhoopBleClient(
         private const val WHOOP5_HISTORY_TRANSFER_DELAY_MS = 700L
         /** Goose parity: one retry after an idle 5/MG history attempt with no packet bodies. */
         private const val WHOOP5_HISTORY_MAX_ATTEMPTS = 2
+        /** ADB pull path: run-as com.noop.whoop.debug cat files/whoop5-backfill-capture.jsonl */
+        private const val WHOOP5_BACKFILL_CAPTURE_FILE = "whoop5-backfill-capture.jsonl"
+        /** Bound debug capture size so a noisy console-log stream cannot grow forever. */
+        private const val WHOOP5_BACKFILL_CAPTURE_MAX_LINES = 20_000
 
         // MARK: Live-stream keep-alive (port of BLEManager.keepAlive*). The WHOOP firmware lets the
         // realtime HR stream lapse if it isn't re-armed, so a stuck-on-stale HR that only a manual
@@ -359,6 +368,10 @@ class WhoopBleClient(
     private var whoop5HistoryAttempts = 0
     private var whoop5HistoricalPacketsThisSession = 0
     private val whoop5BackfillCaptureSummary = BackfillCaptureSummary()
+    private var whoop5BackfillCaptureWriter: BufferedWriter? = null
+    private var whoop5BackfillCaptureSessionId: String = ""
+    private var whoop5BackfillCaptureLines = 0
+    private var whoop5BackfillCaptureDisabled = false
 
     /** Newest unix the strap reports having (from GET_DATA_RANGE); refreshed each connect. */
     @Volatile
@@ -950,6 +963,15 @@ class WhoopBleClient(
                                 crcOk = parsedForLog.crcOk,
                                 size = frame.size,
                                 characteristic = uuid.toString(),
+                                hex = frame.toHex(),
+                            )
+                            writeWhoop5BackfillCapture(
+                                characteristic = uuid.toString(),
+                                typeName = parsedForLog.typeName,
+                                crcOk = parsedForLog.crcOk,
+                                offload = offload,
+                                size = frame.size,
+                                parsed = parsedForLog.parsed,
                                 hex = frame.toHex(),
                             )
                             log(
@@ -1582,6 +1604,7 @@ class WhoopBleClient(
             whoop5HistoryAttempts += 1
             if (whoop5HistoryAttempts == 1) whoop5HistoricalPacketsThisSession = 0
             whoop5BackfillCaptureSummary.reset()
+            startWhoop5BackfillCapture()
             send(CommandNumber.GET_DATA_RANGE, byteArrayOf(), withResponse = true)
             if (!ConnectionSubscriptionPolicy.waitForDataRangeSuccessBeforeHistoricalTransfer(connectedFamily)) {
                 handler.postDelayed({
@@ -1690,6 +1713,7 @@ class WhoopBleClient(
         handler.removeCallbacks(backfillTimeoutRunnable)
         backfillFrameQueue.clear()
         logWhoop5BackfillSummary(reason)
+        closeWhoop5BackfillCapture()
         log("Backfill: session ended — reason=$reason")
     }
 
@@ -1701,6 +1725,76 @@ class WhoopBleClient(
                 "counts=${whoop5BackfillCaptureSummary.countsText()}",
         )
         log("Backfill: WHOOP 5/MG unknown samples=${whoop5BackfillCaptureSummary.unknownSamplesText()}")
+    }
+
+    private fun startWhoop5BackfillCapture() {
+        closeWhoop5BackfillCapture()
+        whoop5BackfillCaptureSessionId = "whoop5-${System.currentTimeMillis()}"
+        whoop5BackfillCaptureLines = 0
+        whoop5BackfillCaptureDisabled = false
+        val file = File(context.filesDir, WHOOP5_BACKFILL_CAPTURE_FILE)
+        try {
+            whoop5BackfillCaptureWriter = BufferedWriter(FileWriter(file, false))
+            log("Backfill: WHOOP 5/MG raw capture writing to files/$WHOOP5_BACKFILL_CAPTURE_FILE")
+        } catch (t: Throwable) {
+            whoop5BackfillCaptureWriter = null
+            whoop5BackfillCaptureDisabled = true
+            log("Backfill: WHOOP 5/MG raw capture unavailable: ${t.message}")
+        }
+    }
+
+    private fun writeWhoop5BackfillCapture(
+        characteristic: String,
+        typeName: String,
+        crcOk: Boolean?,
+        offload: Boolean,
+        size: Int,
+        parsed: Map<String, Any?>,
+        hex: String,
+    ) {
+        if (whoop5BackfillCaptureDisabled) return
+        val writer = whoop5BackfillCaptureWriter ?: return
+        if (whoop5BackfillCaptureLines >= WHOOP5_BACKFILL_CAPTURE_MAX_LINES) {
+            whoop5BackfillCaptureDisabled = true
+            log("Backfill: WHOOP 5/MG raw capture reached $WHOOP5_BACKFILL_CAPTURE_MAX_LINES lines; stopping.")
+            closeWhoop5BackfillCapture()
+            return
+        }
+        try {
+            writer.write(
+                BackfillCaptureJsonl.encode(
+                    BackfillCaptureRecord(
+                        capturedAtMs = System.currentTimeMillis(),
+                        sessionId = whoop5BackfillCaptureSessionId,
+                        characteristic = characteristic,
+                        typeName = typeName,
+                        crcOk = crcOk,
+                        offload = offload,
+                        size = size,
+                        parsed = parsed,
+                        hex = hex,
+                    ),
+                ),
+            )
+            writer.newLine()
+            whoop5BackfillCaptureLines += 1
+            if (whoop5BackfillCaptureLines % 100 == 0) writer.flush()
+        } catch (t: Throwable) {
+            whoop5BackfillCaptureDisabled = true
+            log("Backfill: WHOOP 5/MG raw capture write failed: ${t.message}")
+            closeWhoop5BackfillCapture()
+        }
+    }
+
+    private fun closeWhoop5BackfillCapture() {
+        val writer = whoop5BackfillCaptureWriter ?: return
+        whoop5BackfillCaptureWriter = null
+        try {
+            writer.flush()
+            writer.close()
+        } catch (_: Throwable) {
+            // Best-effort debug capture; sync must not fail because file close failed.
+        }
     }
 
     /**
@@ -1776,6 +1870,7 @@ class WhoopBleClient(
         whoop5HistoryAttempts = 0
         whoop5HistoricalPacketsThisSession = 0
         whoop5BackfillCaptureSummary.reset()
+        closeWhoop5BackfillCapture()
         backfilling = false
         backfillDraining = false
         backfillFrameQueue.clear()
@@ -1796,6 +1891,7 @@ class WhoopBleClient(
      * (e.g. AppViewModel.onCleared) AFTER [disconnect]. Idempotent.
      */
     fun shutdown() {
+        closeWhoop5BackfillCapture()
         ioScope.cancel()
     }
 
